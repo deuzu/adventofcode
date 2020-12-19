@@ -1,23 +1,13 @@
 #[macro_use]
 extern crate lazy_static;
 
+use regex::{Captures, Regex};
 use std::fs::File;
 use std::io;
 use std::io::Read;
 use std::path::Path;
-use regex::{Captures, Regex, RegexSet, SetMatches};
-
-lazy_static! {
-    static ref RE_SET_FIELDS: RegexSet = RegexSet::new(&[
-        r"byr:",
-        r"iyr:",
-        r"eyr:",
-        r"hgt:",
-        r"hcl:",
-        r"ecl:",
-        r"pid:",
-    ]).unwrap();
-}
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 lazy_static! {
     static ref RE_HGT: Regex = Regex::new(r"^(\d{2,3})(cm|in)$").unwrap();
@@ -45,79 +35,87 @@ pub fn get_input() -> Result<String, io::Error> {
     Ok(input)
 }
 
-pub fn part1(input: &String) -> u32 {
+pub fn part1(input: &String) -> usize {
     let passports = input.split("\n\n");
-    let mut valid_passports = 0;
+    let valid_passports = passports.filter(|p| is_passport_valid_part1(*p));
 
-    for passport in passports {
-        let normalized_passport = passport
-            .split("\n")
-            .fold(String::new(), |acc, fields| format!("{} {}", acc, fields));
-        if normalized_passport.contains("byr:")
-            && normalized_passport.contains("iyr:")
-            && normalized_passport.contains("eyr:")
-            && normalized_passport.contains("hgt:")
-            && normalized_passport.contains("hcl:")
-            && normalized_passport.contains("ecl:")
-            && normalized_passport.contains("pid:") {
-            valid_passports = valid_passports + 1;
-        }
-    }
-
-    valid_passports
+    valid_passports.count()
 }
 
-pub fn part2(input: &String) -> u32 {
-    let mut valid_passports = 0;
+pub fn part2(input: &str) -> usize {
     let passports = input.split("\n\n");
+    let valid_passports = passports.filter(|p| is_passport_valid_part2(*p));
 
-    'passport: for passport in passports {
-        let normalized_passport = passport
-            .split("\n")
-            .fold(String::new(), |acc, fields| format!("{} {}", acc, fields).trim().to_string());
+    valid_passports.count()
+}
 
-        if !has_mandatory_fields(passport) {
-            continue;
-        }
+pub fn part2_multi_thread(input: &String, num_threads: usize) -> usize {
+    let passports = input.split("\n\n");
+    let passports: Vec<String> = passports.into_iter().map(|x| x.to_string()).collect();
+    let valid_passports = Arc::new(Mutex::new(0));
+    let mut handles = vec![];
 
-        let fields = normalized_passport.split(" ");
-
-        for field in fields {
-            if !field_is_valid(field) {
-                continue 'passport;
+    for chunk in passports.chunks(passports.len() / num_threads) {
+        let valid = valid_passports.clone();
+        let vec = Vec::from(chunk);
+        let handle = thread::spawn(move || {
+            let valid_passport_chunk = vec.iter().filter(|p| is_passport_valid_part2(*p)).count();
+            if let Ok(mut valid) = valid.lock() {
+                *valid += valid_passport_chunk;
             }
-        }
-
-        valid_passports += 1;
+        });
+        handles.push(handle);
     }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let valid_passports = *valid_passports.lock().unwrap();
 
     valid_passports
 }
 
-fn has_mandatory_fields(passport: &str) -> bool {
-    let caps: SetMatches = RE_SET_FIELDS.matches(passport);
+fn is_passport_valid_part1(passport: &str) -> bool {
+    let fields: Vec<&str> = passport.split(|c| c == '\n' || c == ' ').collect();
 
-    return 7 == caps.into_iter().count()
+    has_mandatory_fields(&fields)
+}
+
+fn is_passport_valid_part2(passport: &str) -> bool {
+    let fields: Vec<&str> = passport.split(|c| c == '\n' || c == ' ').collect();
+
+    has_mandatory_fields(&fields) && fields_are_valid(&fields)
+}
+
+fn has_mandatory_fields(fields: &Vec<&str>) -> bool {
+    let required_fields = fields.iter().filter(|f| !f.contains("cid"));
+
+    7 <= required_fields.count()
+}
+
+fn fields_are_valid(fields: &Vec<&str>) -> bool {
+    !fields.iter().any(|f| !field_is_valid(f))
 }
 
 fn field_is_valid(field: &str) -> bool {
-    let mut key_value = field.split(":");
-    let key = key_value.next();
-    let value = match key_value.next() {
-        Some(v) => v,
-        _ => return false,
-    };
+    let mut iter = field.split(":");
+    let (key, value) = (iter.next(), iter.next());
 
-    match key {
-        Some("byr") => return is_valid_number_in_range(value, 1920, 2002),
-        Some("iyr") => return is_valid_number_in_range(value, 2010, 2020),
-        Some("eyr") => return is_valid_number_in_range(value, 2020, 2030),
-        Some("hgt") => return is_valid_height(value),
-        Some("hcl") => return is_valid_hair_color(value),
-        Some("ecl") => return is_valid_eye_color(value),
-        Some("pid") => return is_valid_passport_id(value),
-        Some(_) => return true,
-        None => return false,
+    match (key, value) {
+        (Some(key), Some(value)) => {
+            match key {
+                "byr" => is_valid_number_in_range(value, 1920, 2002),
+                "iyr" => is_valid_number_in_range(value, 2010, 2020),
+                "eyr" => is_valid_number_in_range(value, 2020, 2030),
+                "hgt" => is_valid_height(value),
+                "hcl" => is_valid_hair_color(value),
+                "ecl" => is_valid_eye_color(value),
+                "pid" => is_valid_passport_id(value),
+                _ => true,
+            }
+        },
+        _ => true,
     }
 }
 
@@ -175,7 +173,7 @@ fn is_valid_passport_id(passport_id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_input, part1, part2};
+    use super::{get_input, part1, part2, part2_multi_thread};
 
     #[test]
     fn test_part1() {
@@ -191,5 +189,13 @@ mod tests {
         let expected_result = 175;
 
         assert_eq!(expected_result, part2(&input));
+    }
+
+    #[test]
+    fn test_part2_multi_thread() {
+        let input = get_input().unwrap();
+        let expected_result = 175;
+
+        assert_eq!(expected_result, part2_multi_thread(&input, 4));
     }
 }
